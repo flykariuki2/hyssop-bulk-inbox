@@ -3,6 +3,26 @@
 import Link from "next/link";
 import { useState } from "react";
 
+type PreviewSample = {
+  phone_number: string | number;
+  name: string;
+  params: string[];
+};
+
+type PreviewResult = {
+  ok?: boolean;
+  message?: string;
+  totalRows?: number;
+  selectedParamColumns?: string[];
+  sampleMessages?: PreviewSample[];
+};
+
+type SendResult = {
+  ok?: boolean;
+  message?: string;
+  [key: string]: unknown;
+};
+
 export default function BulkSendPage() {
   const [sheetId, setSheetId] = useState("");
   const [sheetName, setSheetName] = useState("");
@@ -12,10 +32,12 @@ export default function BulkSendPage() {
   const [param2, setParam2] = useState("");
   const [param3, setParam3] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewResult, setPreviewResult] = useState<any>(null);
+  const [previewResult, setPreviewResult] =
+  useState<PreviewResult | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [sendLoading, setSendLoading] = useState(false);
-  const [sendResult, setSendResult] = useState<any>(null);
+  const [sendResult, setSendResult] =
+  useState<SendResult | null>(null);
 
   async function handlePreview() {
   try {

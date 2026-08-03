@@ -3,18 +3,27 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getMessages, getContacts } from "@/lib/messages/queries";
+
 import { groupMessagesByPhone } from "@/lib/messages/groupMessages";
+import { getContacts, getMessages } from "@/lib/messages/queries";
 import { supabase } from "@/lib/supabase/browser";
 
 type Message = {
   id: string;
   phone_number: string;
-  message_text: string;
+  message_text: string | null;
   direction: "incoming" | "outgoing";
   status: string;
+  message_id?: string | null;
   created_at: string;
-  is_read?: boolean;
+  is_read: boolean | null;
+  media_url?: string | null;
+  media_type?: string | null;
+  media_name?: string | null;
+  media_mime_type?: string | null;
+  media_size_bytes?: number | null;
+  thumbnail_url?: string | null;
+  caption?: string | null;
 };
 
 type Contact = {
@@ -23,10 +32,13 @@ type Contact = {
 };
 
 type FilterType = "all" | "unread" | "expired";
+type OutgoingMediaType = "image" | "file";
 
 function formatTime(dateString?: string) {
   if (!dateString) return "";
+
   const date = new Date(dateString);
+
   if (Number.isNaN(date.getTime())) return "";
 
   return date.toLocaleTimeString([], {
@@ -37,7 +49,9 @@ function formatTime(dateString?: string) {
 
 function formatDate(dateString?: string) {
   if (!dateString) return "";
+
   const date = new Date(dateString);
+
   if (Number.isNaN(date.getTime())) return "";
 
   return date.toLocaleDateString([], {
@@ -49,34 +63,84 @@ function formatDate(dateString?: string) {
 
 function formatRelativeDay(dateString?: string) {
   if (!dateString) return "";
+
   const date = new Date(dateString);
+
   if (Number.isNaN(date.getTime())) return "";
 
   const today = new Date();
   const yesterday = new Date();
+
   yesterday.setDate(today.getDate() - 1);
 
-  if (date.toDateString() === today.toDateString()) return "Today";
-  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+  if (date.toDateString() === today.toDateString()) {
+    return "Today";
+  }
+
+  if (date.toDateString() === yesterday.toDateString()) {
+    return "Yesterday";
+  }
 
   return formatDate(dateString);
 }
 
+function formatFileSize(size?: number | null) {
+  if (!size || size <= 0) return "";
+
+  if (size < 1024) {
+    return `${size} B`;
+  }
+
+  if (size < 1024 * 1024) {
+    return `${Math.round(size / 1024)} KB`;
+  }
+
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function isConversationExpired(messages: Message[]) {
   const latestInbound = [...messages]
-    .filter((m) => m.direction === "incoming")
+    .filter((message) => message.direction === "incoming")
     .sort(
       (a, b) =>
-        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        new Date(b.created_at).getTime() -
+        new Date(a.created_at).getTime()
     )[0];
 
   if (!latestInbound) return true;
 
   const lastInboundTime = new Date(latestInbound.created_at).getTime();
-  const now = Date.now();
   const hours24 = 24 * 60 * 60 * 1000;
 
-  return now - lastInboundTime > hours24;
+  return Date.now() - lastInboundTime > hours24;
+}
+
+function getMessagePreview(message?: Message) {
+  if (!message) return "No messages";
+
+  const text =
+    message.caption?.trim() ||
+    message.message_text?.trim();
+
+  if (text) return text;
+
+  if (message.media_type === "image") {
+    return "📷 Photo";
+  }
+
+  if (message.media_type === "video") {
+    return "🎥 Video";
+  }
+
+  if (message.media_type === "audio") {
+    return "🎵 Audio";
+  }
+
+  if (message.media_url) {
+    return `📎 ${message.media_name || "Attachment"}`;
+  }
+
+  return "No message content";
 }
 
 export default function Page() {
@@ -91,10 +155,11 @@ export default function Page() {
   const [sendError, setSendError] = useState("");
   const [loading, setLoading] = useState(true);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
-  const [deletingConversation, setDeletingConversation] = useState(false);
-  const [deletingMessageId, setDeletingMessageId] = useState<string | null>(
-    null
-  );
+  const [deletingConversation, setDeletingConversation] =
+    useState(false);
+  const [deletingMessageId, setDeletingMessageId] = useState<
+    string | null
+  >(null);
 
   const router = useRouter();
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -106,12 +171,13 @@ export default function Page() {
       getContacts(),
     ]);
 
-    setMessages(messagesData || []);
-    setContacts(contactsData || []);
+    setMessages(messagesData);
+    setContacts(contactsData);
   }
 
   async function uploadAttachment(file: File, phone: string) {
-    const fileExt = file.name.split(".").pop() || "file";
+    const extension = file.name.split(".").pop() || "file";
+
     const safeName = file.name
       .replace(/\.[^/.]+$/, "")
       .replace(/[^a-zA-Z0-9-_]/g, "-")
@@ -119,25 +185,31 @@ export default function Page() {
 
     const fileName = `${Date.now()}-${Math.random()
       .toString(36)
-      .substring(2)}-${safeName}.${fileExt}`;
+      .substring(2)}-${safeName}.${extension}`;
 
-    const filePath = `${phone}/${fileName}`;
+    const safePhone = phone.replace(/[^0-9]/g, "");
+    const filePath = `${safePhone}/${fileName}`;
 
     const { error } = await supabase.storage
       .from("attachments")
       .upload(filePath, file, {
         cacheControl: "3600",
         upsert: false,
+        contentType: file.type,
       });
 
     if (error) {
       console.error("Attachment upload error:", error);
-      throw new Error("Upload failed");
+      throw new Error("Attachment upload failed.");
     }
 
     const { data } = supabase.storage
       .from("attachments")
       .getPublicUrl(filePath);
+
+    if (!data.publicUrl) {
+      throw new Error("Attachment URL was not generated.");
+    }
 
     return data.publicUrl;
   }
@@ -151,11 +223,15 @@ export default function Page() {
   useEffect(() => {
     const load = async () => {
       setLoading(true);
-      await refreshMessages();
-      setLoading(false);
+
+      try {
+        await refreshMessages();
+      } finally {
+        setLoading(false);
+      }
     };
 
-    load();
+    void load();
   }, []);
 
   useEffect(() => {
@@ -163,30 +239,47 @@ export default function Page() {
       .channel("messages-realtime")
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "messages" },
-        async () => {
-          await refreshMessages();
+        {
+          event: "*",
+          schema: "public",
+          table: "messages",
+        },
+        () => {
+          void refreshMessages();
         }
       )
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      void supabase.removeChannel(channel);
     };
   }, []);
 
   const conversations = useMemo(() => {
-    return groupMessagesByPhone(
-      messages.filter((m) => m.phone_number?.trim() && m.message_text?.trim())
-    );
+    const visibleMessages = messages.filter((message) => {
+      const hasPhone = Boolean(message.phone_number?.trim());
+
+      const hasContent = Boolean(
+        message.message_text?.trim() ||
+          message.caption?.trim() ||
+          message.media_url?.trim()
+      );
+
+      return hasPhone && hasContent;
+    });
+
+    return groupMessagesByPhone(visibleMessages);
   }, [messages]);
 
   const contactMap = useMemo(() => {
     const map: Record<string, string> = {};
 
     contacts.forEach((contact) => {
-      if (contact.phone_number?.trim() && contact.name?.trim()) {
-        map[contact.phone_number.trim()] = contact.name.trim();
+      const phone = contact.phone_number?.trim();
+      const name = contact.name?.trim();
+
+      if (phone && name) {
+        map[phone] = name;
       }
     });
 
@@ -195,17 +288,19 @@ export default function Page() {
 
   const conversationMeta = useMemo(() => {
     return Object.keys(conversations).map((phone) => {
-      const convo = conversations[phone] || [];
-      const lastMsg = convo.at(-1);
-      const expired = isConversationExpired(convo);
-      const unreadCount = convo.filter(
-        (m) => m.direction === "incoming" && !m.is_read
+      const conversation = conversations[phone] || [];
+      const lastMessage = conversation.at(-1);
+      const expired = isConversationExpired(conversation);
+
+      const unreadCount = conversation.filter(
+        (message) =>
+          message.direction === "incoming" && !message.is_read
       ).length;
 
       return {
         phone,
-        convo,
-        lastMsg,
+        conversation,
+        lastMessage,
         expired,
         unreadCount,
         displayName: contactMap[phone] || phone,
@@ -217,52 +312,94 @@ export default function Page() {
     const term = search.trim().toLowerCase();
 
     return conversationMeta
-      .filter(({ phone, displayName, lastMsg, unreadCount, expired }) => {
-        const matchesSearch =
-          !term ||
-          phone.toLowerCase().includes(term) ||
-          displayName.toLowerCase().includes(term) ||
-          (lastMsg?.message_text || "").toLowerCase().includes(term);
+      .filter(
+        ({
+          phone,
+          displayName,
+          lastMessage,
+          unreadCount,
+          expired,
+        }) => {
+          const lastMessagePreview =
+            getMessagePreview(lastMessage).toLowerCase();
 
-        if (!matchesSearch) return false;
+          const matchesSearch =
+            !term ||
+            phone.toLowerCase().includes(term) ||
+            displayName.toLowerCase().includes(term) ||
+            lastMessagePreview.includes(term);
 
-        if (filter === "unread") return unreadCount > 0;
-        if (filter === "expired") return expired;
+          if (!matchesSearch) return false;
 
-        return true;
-      })
+          if (filter === "unread") {
+            return unreadCount > 0;
+          }
+
+          if (filter === "expired") {
+            return expired;
+          }
+
+          return true;
+        }
+      )
       .sort((a, b) => {
-        const aTime = new Date(a.lastMsg?.created_at || 0).getTime();
-        const bTime = new Date(b.lastMsg?.created_at || 0).getTime();
+        const aTime = new Date(
+          a.lastMessage?.created_at || 0
+        ).getTime();
+
+        const bTime = new Date(
+          b.lastMessage?.created_at || 0
+        ).getTime();
+
         return bTime - aTime;
       });
   }, [conversationMeta, filter, search]);
 
   useEffect(() => {
-    const allPhones = conversationMeta.map((c) => c.phone);
+    const allPhones = conversationMeta.map(
+      (conversation) => conversation.phone
+    );
 
-    if (!selectedPhone && filter === "all" && allPhones.length > 0) {
-      setSelectedPhone(allPhones[0]);
-      return;
-    }
+    const timeout = window.setTimeout(() => {
+      if (
+        !selectedPhone &&
+        filter === "all" &&
+        allPhones.length > 0
+      ) {
+        setSelectedPhone(allPhones[0]);
+        return;
+      }
 
-    if (selectedPhone && !allPhones.includes(selectedPhone)) {
-      setSelectedPhone(allPhones[0] || null);
-      setMobileChatOpen(false);
-    }
+      if (
+        selectedPhone &&
+        !allPhones.includes(selectedPhone)
+      ) {
+        setSelectedPhone(allPhones[0] || null);
+        setMobileChatOpen(false);
+      }
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
   }, [conversationMeta, selectedPhone, filter]);
 
   const activeMessages = useMemo(() => {
     if (!selectedPhone) return [];
+
     return [...(conversations[selectedPhone] || [])].sort(
       (a, b) =>
-        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+        new Date(a.created_at).getTime() -
+        new Date(b.created_at).getTime()
     );
   }, [selectedPhone, conversations]);
 
   const activeConversationExpired = useMemo(() => {
     if (!selectedPhone) return true;
-    return isConversationExpired(conversations[selectedPhone] || []);
+
+    return isConversationExpired(
+      conversations[selectedPhone] || []
+    );
   }, [selectedPhone, conversations]);
 
   const activeDisplayName = selectedPhone
@@ -279,39 +416,58 @@ export default function Page() {
       });
     }, 50);
 
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+    };
   }, [selectedPhone, activeMessages.length, mobileChatOpen]);
 
   useEffect(() => {
     if (!selectedPhone) return;
 
-    const unreadIncoming = (conversations[selectedPhone] || []).filter(
-      (m) => m.direction === "incoming" && !m.is_read
+    const unreadIncoming = (
+      conversations[selectedPhone] || []
+    ).filter(
+      (message) =>
+        message.direction === "incoming" && !message.is_read
     );
 
     if (unreadIncoming.length === 0) return;
 
-    const unreadIds = unreadIncoming.map((m) => m.id);
-
-    setMessages((prev) =>
-      prev.map((msg) =>
-        unreadIds.includes(msg.id) ? { ...msg, is_read: true } : msg
-      )
+    const unreadIds = unreadIncoming.map(
+      (message) => message.id
     );
 
-    supabase
+    void supabase
       .from("messages")
       .update({ is_read: true })
       .in("id", unreadIds)
       .then(({ error }) => {
         if (error) {
-          console.error("Failed to mark messages as read:", error);
-          refreshMessages();
+          console.error(
+            "Failed to mark messages as read:",
+            error
+          );
+
+          void refreshMessages();
+          return;
         }
+
+        setMessages((previousMessages) =>
+          previousMessages.map((message) =>
+            unreadIds.includes(message.id)
+              ? {
+                  ...message,
+                  is_read: true,
+                }
+              : message
+          )
+        );
       });
   }, [selectedPhone, conversations]);
 
-  function handleAttachmentChange(event: React.ChangeEvent<HTMLInputElement>) {
+  function handleAttachmentChange(
+    event: React.ChangeEvent<HTMLInputElement>
+  ) {
     const file = event.target.files?.[0] || null;
 
     if (!file) return;
@@ -324,16 +480,22 @@ export default function Page() {
     ];
 
     if (!allowedTypes.includes(file.type)) {
-      setSendError("Only JPG, PNG, WEBP, and PDF files are supported for now.");
+      setSendError(
+        "Only JPG, PNG, WEBP and PDF files are currently supported."
+      );
+
       event.target.value = "";
       return;
     }
 
-    const maxSizeMb = 10;
+    const maxSizeMb = 25;
     const maxSizeBytes = maxSizeMb * 1024 * 1024;
 
     if (file.size > maxSizeBytes) {
-      setSendError("Attachment must be 10MB or smaller.");
+      setSendError(
+        `Attachment must be ${maxSizeMb} MB or smaller.`
+      );
+
       event.target.value = "";
       return;
     }
@@ -354,24 +516,21 @@ export default function Page() {
 
     const originalDraft = draft;
     const originalAttachment = attachment;
+    const messageText = draft.trim();
 
-    let messageText = draft.trim();
     let mediaUrl: string | null = null;
-    let mediaType: "image" | "file" | null = null;
+    let mediaType: OutgoingMediaType | null = null;
 
-    if (attachment) {
+    if (originalAttachment) {
       try {
-        mediaUrl = await uploadAttachment(attachment, selectedPhone);
+        mediaUrl = await uploadAttachment(
+          originalAttachment,
+          selectedPhone
+        );
 
-        if (attachment.type.startsWith("image")) {
-          mediaType = "image";
-        } else if (attachment.type === "application/pdf") {
-          mediaType = "file";
-        }
-
-        if (!messageText) {
-          messageText = `[Attachment] ${attachment.name}`;
-        }
+        mediaType = originalAttachment.type.startsWith("image/")
+          ? "image"
+          : "file";
       } catch (error) {
         console.error(error);
         setSendError("Failed to upload attachment.");
@@ -382,45 +541,73 @@ export default function Page() {
     const tempMessage: Message = {
       id: `temp-${Date.now()}`,
       phone_number: selectedPhone,
-      message_text: messageText,
+      message_text: messageText || null,
       direction: "outgoing",
       status: "sending",
       created_at: new Date().toISOString(),
       is_read: true,
+      media_url: mediaUrl,
+      media_type: mediaType,
+      media_name: originalAttachment?.name || null,
+      media_mime_type: originalAttachment?.type || null,
+      media_size_bytes: originalAttachment?.size || null,
+      caption: messageText || null,
     };
 
-    setMessages((prev) => [...prev, tempMessage]);
+    setMessages((previousMessages) => [
+      ...previousMessages,
+      tempMessage,
+    ]);
+
     setDraft("");
     setAttachment(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
     setIsSending(true);
     setSendError("");
 
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+
     try {
-      const res = await fetch(
+      const response = await fetch(
         "https://promptlyai.app.n8n.cloud/webhook/send-message",
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+          },
           body: JSON.stringify({
             phone: selectedPhone,
             phone_number: selectedPhone,
             message: messageText,
             mediaUrl,
             mediaType,
+            mediaName: originalAttachment?.name || null,
+            mediaMimeType: originalAttachment?.type || null,
+            mediaSizeBytes: originalAttachment?.size || null,
+            caption: messageText || null,
           }),
         }
       );
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || "Failed to send");
+      if (!response.ok) {
+        const responseText = await response.text();
+
+        throw new Error(
+          responseText || "Message failed to send."
+        );
       }
 
       await refreshMessages();
     } catch (error) {
       console.error(error);
-      setMessages((prev) => prev.filter((m) => m.id !== tempMessage.id));
+
+      setMessages((previousMessages) =>
+        previousMessages.filter(
+          (message) => message.id !== tempMessage.id
+        )
+      );
+
       setDraft(originalDraft);
       setAttachment(originalAttachment);
       setSendError("Message failed to send.");
@@ -430,7 +617,10 @@ export default function Page() {
   }
 
   async function handleDeleteMessage(messageId: string) {
-    const confirmed = window.confirm("Delete this message?");
+    const confirmed = window.confirm(
+      "Delete this message?"
+    );
+
     if (!confirmed) return;
 
     setDeletingMessageId(messageId);
@@ -443,10 +633,14 @@ export default function Page() {
 
       if (error) throw error;
 
-      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+      setMessages((previousMessages) =>
+        previousMessages.filter(
+          (message) => message.id !== messageId
+        )
+      );
     } catch (error) {
       console.error(error);
-      alert("Failed to delete message.");
+      window.alert("Failed to delete message.");
     } finally {
       setDeletingMessageId(null);
     }
@@ -458,6 +652,7 @@ export default function Page() {
     const confirmed = window.confirm(
       `Delete the entire conversation for ${activeDisplayName}?`
     );
+
     if (!confirmed) return;
 
     setDeletingConversation(true);
@@ -470,14 +665,18 @@ export default function Page() {
 
       if (error) throw error;
 
-      setMessages((prev) =>
-        prev.filter((m) => m.phone_number !== selectedPhone)
+      setMessages((previousMessages) =>
+        previousMessages.filter(
+          (message) =>
+            message.phone_number !== selectedPhone
+        )
       );
+
       setSelectedPhone(null);
       setMobileChatOpen(false);
     } catch (error) {
       console.error(error);
-      alert("Failed to delete conversation.");
+      window.alert("Failed to delete conversation.");
     } finally {
       setDeletingConversation(false);
     }
@@ -492,92 +691,191 @@ export default function Page() {
     setMobileChatOpen(false);
   }
 
+  function renderMessageMedia(message: Message) {
+    if (!message.media_url) return null;
+
+    const mediaType = message.media_type?.toLowerCase();
+    const mimeType =
+      message.media_mime_type?.toLowerCase() || "";
+
+    const isImage =
+      mediaType === "image" ||
+      mimeType.startsWith("image/");
+
+    const isVideo =
+      mediaType === "video" ||
+      mimeType.startsWith("video/");
+
+    const isAudio =
+      mediaType === "audio" ||
+      mimeType.startsWith("audio/");
+
+    if (isImage) {
+      return (
+        <a
+          href={message.media_url}
+          target="_blank"
+          rel="noreferrer"
+          className="mb-2 block overflow-hidden rounded-xl"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={message.media_url}
+            alt={message.media_name || "WhatsApp attachment"}
+            className="max-h-[420px] w-full rounded-xl object-cover"
+          />
+        </a>
+      );
+    }
+
+    if (isVideo) {
+      return (
+        <video
+          src={message.media_url}
+          controls
+          preload="metadata"
+          className="mb-2 max-h-[420px] w-full rounded-xl bg-black"
+        >
+          Your browser does not support video playback.
+        </video>
+      );
+    }
+
+    if (isAudio) {
+      return (
+        <audio
+          src={message.media_url}
+          controls
+          preload="metadata"
+          className="mb-2 w-full"
+        >
+          Your browser does not support audio playback.
+        </audio>
+      );
+    }
+
+    return (
+      <a
+        href={message.media_url}
+        target="_blank"
+        rel="noreferrer"
+        className="mb-2 flex items-center gap-3 rounded-xl border border-black/10 bg-black/10 px-3 py-3 transition hover:bg-black/15"
+      >
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-black/10 text-xl">
+          📄
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-semibold">
+            {message.media_name || "Open attachment"}
+          </div>
+
+          <div className="mt-0.5 text-xs opacity-70">
+            {message.media_mime_type || "Document"}
+            {message.media_size_bytes
+              ? ` • ${formatFileSize(
+                  message.media_size_bytes
+                )}`
+              : ""}
+          </div>
+        </div>
+      </a>
+    );
+  }
+
   const sidebar = (
     <aside className="flex h-full w-full flex-col bg-slate-950">
       <div className="border-b border-slate-800 px-4 py-4">
         <div className="text-xl font-semibold tracking-tight text-white">
           Hyssop Bulk Inbox
         </div>
+
         <div className="mt-1 text-sm text-slate-400">
           WhatsApp conversations
         </div>
 
-        <button
-          onClick={handleSignOut}
-          className="mt-3 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
-        >
-          Sign out
-        </button>
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <Link
+            href="/inbox/bulk-send"
+            className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-center text-sm font-medium text-emerald-300"
+          >
+            Bulk Send
+          </Link>
 
-        <Link
-          href="/inbox/bulk-send"
-          className="mt-3 block rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-center text-sm font-medium text-emerald-300"
-        >
-          Bulk Send
-        </Link>
+          <button
+            type="button"
+            onClick={handleSignOut}
+            className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+          >
+            Sign out
+          </button>
+        </div>
 
         <div className="mt-4">
           <input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(event) =>
+              setSearch(event.target.value)
+            }
             placeholder="Search chats..."
             className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white outline-none placeholder:text-slate-500 focus:border-slate-500"
           />
         </div>
 
         <div className="mt-3 flex gap-2">
-          <button
-            onClick={() => setFilter("all")}
-            className={`rounded-full px-3 py-1.5 text-sm ${
-              filter === "all"
-                ? "bg-emerald-500 text-slate-950"
-                : "bg-slate-800 text-slate-300"
-            }`}
-          >
-            All
-          </button>
-          <button
-            onClick={() => setFilter("unread")}
-            className={`rounded-full px-3 py-1.5 text-sm ${
-              filter === "unread"
-                ? "bg-emerald-500 text-slate-950"
-                : "bg-slate-800 text-slate-300"
-            }`}
-          >
-            Unread
-          </button>
-          <button
-            onClick={() => setFilter("expired")}
-            className={`rounded-full px-3 py-1.5 text-sm ${
-              filter === "expired"
-                ? "bg-emerald-500 text-slate-950"
-                : "bg-slate-800 text-slate-300"
-            }`}
-          >
-            Expired
-          </button>
+          {(
+            [
+              ["all", "All"],
+              ["unread", "Unread"],
+              ["expired", "Expired"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setFilter(value)}
+              className={`rounded-full px-3 py-1.5 text-sm ${
+                filter === value
+                  ? "bg-emerald-500 text-slate-950"
+                  : "bg-slate-800 text-slate-300"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
         {loading ? (
-          <div className="p-4 text-sm text-slate-400">Loading chats...</div>
+          <div className="p-4 text-sm text-slate-400">
+            Loading chats...
+          </div>
         ) : filteredConversations.length === 0 ? (
           <div className="p-4 text-sm text-slate-400">
             No conversations found.
           </div>
         ) : (
           filteredConversations.map(
-            ({ phone, displayName, lastMsg, unreadCount, expired }) => {
+            ({
+              phone,
+              displayName,
+              lastMessage,
+              unreadCount,
+              expired,
+            }) => {
               const active = selectedPhone === phone;
               const hasSavedName = displayName !== phone;
 
               return (
                 <button
                   key={phone}
+                  type="button"
                   onClick={() => openChat(phone)}
                   className={`flex w-full items-start gap-3 border-b border-slate-800 px-4 py-4 text-left transition ${
-                    active ? "bg-slate-900" : "hover:bg-slate-900/70"
+                    active
+                      ? "bg-slate-900"
+                      : "hover:bg-slate-900/70"
                   }`}
                 >
                   <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-sm font-semibold text-emerald-300">
@@ -590,6 +888,7 @@ export default function Page() {
                         <div className="truncate font-medium text-white">
                           {displayName}
                         </div>
+
                         {hasSavedName && (
                           <div className="truncate text-xs text-slate-500">
                             {phone}
@@ -598,26 +897,30 @@ export default function Page() {
                       </div>
 
                       <div className="shrink-0 text-xs text-slate-500">
-                        {formatTime(lastMsg?.created_at)}
+                        {formatTime(
+                          lastMessage?.created_at
+                        )}
                       </div>
                     </div>
 
                     <div className="mt-1 flex items-center justify-between gap-3">
                       <div className="truncate text-sm text-slate-400">
-                        {lastMsg?.message_text || "No messages"}
+                        {getMessagePreview(lastMessage)}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex shrink-0 items-center gap-2">
                         {expired && (
                           <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-300">
                             Expired
                           </span>
                         )}
-                        {unreadCount > 0 && selectedPhone !== phone && (
-                          <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-slate-950">
-                            {unreadCount}
-                          </span>
-                        )}
+
+                        {unreadCount > 0 &&
+                          selectedPhone !== phone && (
+                            <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-slate-950">
+                              {unreadCount}
+                            </span>
+                          )}
                       </div>
                     </div>
                   </div>
@@ -633,36 +936,52 @@ export default function Page() {
   const chatPanel = (
     <section className="flex h-full min-w-0 flex-1 flex-col bg-slate-900">
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-4 md:px-6">
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-3">
           <button
+            type="button"
             onClick={closeMobileChat}
             className="rounded-full bg-slate-800 px-3 py-1.5 text-sm text-slate-300 md:hidden"
           >
             Back
           </button>
 
-          <div>
-            <div className="font-semibold text-white">{activeDisplayName}</div>
-            {selectedPhone && contactMap[selectedPhone] && (
-              <div className="mt-1 text-xs text-slate-500">{selectedPhone}</div>
-            )}
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-white">
+              {activeDisplayName}
+            </div>
+
             {selectedPhone && (
-              <div className="mt-1 text-xs text-slate-400">
-                {activeConversationExpired
-                  ? "Expired: cannot reply until customer messages again"
-                  : "Active: reply window open"}
-              </div>
+              <>
+                <div className="mt-1 truncate text-xs text-slate-500">
+                  {selectedPhone}
+                </div>
+
+                <div
+                  className={`mt-1 text-xs ${
+                    activeConversationExpired
+                      ? "text-amber-300"
+                      : "text-emerald-300"
+                  }`}
+                >
+                  {activeConversationExpired
+                    ? "Reply window expired"
+                    : "Reply window active"}
+                </div>
+              </>
             )}
           </div>
         </div>
 
         {selectedPhone && (
           <button
+            type="button"
             onClick={handleDeleteConversation}
             disabled={deletingConversation}
             className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300 disabled:opacity-50"
           >
-            {deletingConversation ? "Deleting..." : "Delete chat"}
+            {deletingConversation
+              ? "Deleting..."
+              : "Delete chat"}
           </button>
         )}
       </div>
@@ -678,60 +997,104 @@ export default function Page() {
           </div>
         ) : (
           <div className="space-y-3">
-            {activeMessages.map((msg, index) => {
-              const isIncoming = msg.direction === "incoming";
-              const previousMessage = activeMessages[index - 1];
+            {activeMessages.map((message, index) => {
+              const isIncoming =
+                message.direction === "incoming";
+
+              const previousMessage =
+                activeMessages[index - 1];
 
               const showDayLabel =
                 !previousMessage ||
-                formatRelativeDay(previousMessage.created_at) !==
-                  formatRelativeDay(msg.created_at);
+                formatRelativeDay(
+                  previousMessage.created_at
+                ) !==
+                  formatRelativeDay(
+                    message.created_at
+                  );
+
+              const displayedText =
+                message.caption?.trim() ||
+                message.message_text?.trim() ||
+                "";
 
               return (
-                <div key={msg.id}>
+                <div key={message.id}>
                   {showDayLabel && (
                     <div className="mb-3 flex justify-center">
                       <div className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-400">
-                        {formatRelativeDay(msg.created_at)}
+                        {formatRelativeDay(
+                          message.created_at
+                        )}
                       </div>
                     </div>
                   )}
 
                   <div
                     className={`group flex ${
-                      isIncoming ? "justify-start" : "justify-end"
+                      isIncoming
+                        ? "justify-start"
+                        : "justify-end"
                     }`}
                   >
                     <div
-                      className={`max-w-[82%] rounded-2xl px-4 py-3 shadow-lg md:max-w-[70%] ${
+                      className={`max-w-[88%] rounded-2xl px-3 py-3 shadow-lg md:max-w-[70%] ${
                         isIncoming
                           ? "rounded-bl-md bg-slate-800 text-white"
                           : "rounded-br-md bg-emerald-500 text-slate-950"
                       }`}
                     >
-                      <div className="whitespace-pre-wrap break-words text-sm leading-6">
-                        {msg.message_text}
-                      </div>
+                      {renderMessageMedia(message)}
+
+                      {displayedText && (
+                        <div className="whitespace-pre-wrap break-words px-1 text-sm leading-6">
+                          {displayedText}
+                        </div>
+                      )}
 
                       <div
-                        className={`mt-1 flex items-center justify-end gap-2 text-[11px] ${
-                          isIncoming ? "text-slate-400" : "text-slate-900/70"
+                        className={`mt-2 flex items-center justify-end gap-2 px-1 text-[11px] ${
+                          isIncoming
+                            ? "text-slate-400"
+                            : "text-slate-900/70"
                         }`}
                       >
-                        <span>{formatTime(msg.created_at)}</span>
-                        {!isIncoming && msg.status && <span>• {msg.status}</span>}
+                        <span>
+                          {formatTime(
+                            message.created_at
+                          )}
+                        </span>
 
-                        {!String(msg.id).startsWith("temp-") && (
+                        {!isIncoming && message.status && (
+                          <span>
+                            • {message.status}
+                          </span>
+                        )}
+
+                        {!String(message.id).startsWith(
+                          "temp-"
+                        ) && (
                           <button
-                            onClick={() => handleDeleteMessage(msg.id)}
-                            disabled={deletingMessageId === msg.id}
+                            type="button"
+                            onClick={() =>
+                              handleDeleteMessage(
+                                message.id
+                              )
+                            }
+                            disabled={
+                              deletingMessageId ===
+                              message.id
+                            }
                             className={`rounded px-1.5 py-0.5 ${
                               isIncoming
                                 ? "bg-slate-700 text-slate-300"
                                 : "bg-emerald-600/30 text-slate-900"
                             }`}
                           >
-                            {deletingMessageId === msg.id ? "..." : "Delete"}
+                            {deletingMessageId ===
+                            message.id
+                              ? "..."
+                              : "Delete"}
                           </button>
                         )}
                       </div>
@@ -753,21 +1116,34 @@ export default function Page() {
           </div>
         )}
 
-        {selectedPhone && activeConversationExpired && (
-          <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
-            This chat is expired. You can only reply after the customer sends a
-            new message.
-          </div>
-        )}
+        {selectedPhone &&
+          activeConversationExpired && (
+            <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+              This chat is expired. You can only reply
+              after the customer sends a new message.
+            </div>
+          )}
 
         {attachment && (
           <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
-            <div className="min-w-0 truncate">Attached: {attachment.name}</div>
+            <div className="min-w-0">
+              <div className="truncate font-medium">
+                {attachment.name}
+              </div>
+
+              <div className="mt-0.5 text-xs text-emerald-300/70">
+                {formatFileSize(attachment.size)}
+              </div>
+            </div>
+
             <button
               type="button"
               onClick={() => {
                 setAttachment(null);
-                if (fileInputRef.current) fileInputRef.current.value = "";
+
+                if (fileInputRef.current) {
+                  fileInputRef.current.value = "";
+                }
               }}
               className="shrink-0 rounded-lg bg-emerald-500/20 px-2 py-1 text-xs text-emerald-100"
             >
@@ -787,8 +1163,14 @@ export default function Page() {
 
           <button
             type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={!selectedPhone || isSending || activeConversationExpired}
+            onClick={() =>
+              fileInputRef.current?.click()
+            }
+            disabled={
+              !selectedPhone ||
+              isSending ||
+              activeConversationExpired
+            }
             className="rounded-2xl border border-slate-700 bg-slate-800 px-4 py-3 text-sm font-semibold text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
             title="Attach file"
           >
@@ -797,27 +1179,39 @@ export default function Page() {
 
           <textarea
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(event) =>
+              setDraft(event.target.value)
+            }
             placeholder={
               !selectedPhone
                 ? "Select a chat first..."
                 : activeConversationExpired
-                ? "Reply window expired"
-                : "Type a message..."
+                  ? "Reply window expired"
+                  : attachment
+                    ? "Add an optional caption..."
+                    : "Type a message..."
             }
-            disabled={!selectedPhone || isSending || activeConversationExpired}
+            disabled={
+              !selectedPhone ||
+              isSending ||
+              activeConversationExpired
+            }
             rows={1}
             className="max-h-32 min-h-[48px] flex-1 resize-y rounded-2xl border border-slate-600 bg-slate-800 px-4 py-3 text-base text-white shadow-inner outline-none placeholder:text-slate-400 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-60 md:max-h-40 md:text-sm"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey
+              ) {
+                event.preventDefault();
+                void handleSend();
               }
             }}
           />
 
           <button
-            onClick={handleSend}
+            type="button"
+            onClick={() => void handleSend()}
             disabled={
               !selectedPhone ||
               (!draft.trim() && !attachment) ||
@@ -837,7 +1231,10 @@ export default function Page() {
     <div className="h-screen bg-slate-950 text-white">
       <div className="mx-auto h-full max-w-[1600px] overflow-hidden border border-slate-800 bg-slate-950 shadow-2xl">
         <div className="hidden h-full md:flex">
-          <div className="w-[380px] border-r border-slate-800">{sidebar}</div>
+          <div className="w-[380px] border-r border-slate-800">
+            {sidebar}
+          </div>
+
           {chatPanel}
         </div>
 

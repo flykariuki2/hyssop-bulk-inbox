@@ -1,34 +1,32 @@
-type Message = {
-  id: string;
+export type GroupableMessage = {
   phone_number: string;
-  message_text: string;
-  direction: "incoming" | "outgoing";
-  status: string;
   created_at: string;
-  is_read?: boolean;
 };
 
-export function groupMessagesByPhone(messages: Message[]) {
-  const grouped: Record<string, Message[]> = {};
+export function groupMessagesByPhone<
+  T extends GroupableMessage
+>(messages: T[]): Record<string, T[]> {
+  const groupedMessages: Record<string, T[]> = {};
 
-  for (const msg of messages) {
-    const phone = msg.phone_number?.trim();
+  for (const message of messages) {
+    const phone = message.phone_number.trim();
+
     if (!phone) continue;
 
-    if (!grouped[phone]) {
-      grouped[phone] = [];
+    if (!groupedMessages[phone]) {
+      groupedMessages[phone] = [];
     }
 
-    grouped[phone].push(msg);
+    groupedMessages[phone].push(message);
   }
 
-  for (const phone in grouped) {
-    grouped[phone].sort(
-      (a, b) =>
-        new Date(a.created_at).getTime() -
-        new Date(b.created_at).getTime()
+  for (const conversation of Object.values(groupedMessages)) {
+    conversation.sort(
+      (firstMessage, secondMessage) =>
+        new Date(firstMessage.created_at).getTime() -
+        new Date(secondMessage.created_at).getTime()
     );
   }
 
-  return grouped;
+  return groupedMessages;
 }
